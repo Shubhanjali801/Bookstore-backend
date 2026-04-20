@@ -1,4 +1,3 @@
-
 const Order = require('../models/Order');
 const OrderItem = require('../models/OrderItem');
 const Book = require('../models/Book');
@@ -16,7 +15,6 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ message: 'No items in order' });
     }
 
-    // Validate stock and calculate total
     let totalPrice = 0;
     for (const item of items) {
       const book = await Book.findById(item.bookId);
@@ -31,7 +29,6 @@ exports.createOrder = async (req, res) => {
       totalPrice += book.price * item.quantity;
     }
 
-    // Create order
     const order = await Order.create({
       userId: req.user._id,
       totalPrice,
@@ -40,7 +37,6 @@ exports.createOrder = async (req, res) => {
       paymentStatus: 'Pending',
     });
 
-    // Create order items and reduce stock
     for (const item of items) {
       const book = await Book.findById(item.bookId);
       await OrderItem.create({
@@ -49,19 +45,17 @@ exports.createOrder = async (req, res) => {
         quantity: item.quantity,
         price: book.price,
       });
-      // Reduce stock
       await Book.findByIdAndUpdate(item.bookId, {
         $inc: { stock: -item.quantity },
       });
     }
 
-    // Send confirmation email (non-blocking)
     sendOrderConfirmation(req.user.email, order, req.user._id).catch((err) =>
       console.error('Email sending failed:', err.message)
     );
 
-    // Populate order items for response
-    const orderItems = await OrderItem.find({ orderId: order._id }).populate('bookId', 'title price');
+    const orderItems = await OrderItem.find({ orderId: order._id })
+      .populate('bookId', 'title price');
 
     res.status(201).json({ order, orderItems });
   } catch (error) {
@@ -75,12 +69,13 @@ exports.createOrder = async (req, res) => {
 // @access  Private
 exports.getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ userId: req.user._id }).sort({ createdAt: -1 });
+    const orders = await Order.find({ userId: req.user._id })
+      .sort({ createdAt: -1 });
 
-    // Attach items to each order
     const ordersWithItems = await Promise.all(
       orders.map(async (order) => {
-        const items = await OrderItem.find({ orderId: order._id }).populate('bookId', 'title imageUrl price');
+        const items = await OrderItem.find({ orderId: order._id })
+          .populate('bookId', 'title imageUrl price');
         return { ...order.toObject(), items };
       })
     );
@@ -97,17 +92,22 @@ exports.getMyOrders = async (req, res) => {
 // @access  Private
 exports.getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).populate('userId', 'name email');
+    const order = await Order.findById(req.params.id)
+      .populate('userId', 'name email');
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    // Only owner or admin can view
-    if (order.userId._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+    if (
+      order.userId._id.toString() !== req.user._id.toString() &&
+      req.user.role !== 'admin'
+    ) {
       return res.status(403).json({ message: 'Not authorized to view this order' });
     }
 
-    const items = await OrderItem.find({ orderId: order._id }).populate('bookId', 'title price imageUrl');
+    const items = await OrderItem.find({ orderId: order._id })
+      .populate('bookId', 'title price imageUrl');
+
     res.status(200).json({ order, items });
   } catch (error) {
     console.error('Error in getOrderById controller:', error.message);
@@ -152,18 +152,21 @@ exports.updateOrderStatus = async (req, res) => {
     const { orderStatus, paymentStatus } = req.body;
 
     // ── Validate orderStatus ──────────────────────────────
-    const validOrderStatuses = ['Created', 'Confirmed', 'Processing', 'Shipped', 'Delivered', 'Cancelled'];
+    const validOrderStatuses = [
+      'Created', 'Confirmed', 'Processing',
+      'Shipped', 'Delivered', 'Cancelled'
+    ];
     if (orderStatus && !validOrderStatuses.includes(orderStatus)) {
-      return res.status(400).json({ 
-        message: `Invalid status. Must be one of: ${validOrderStatuses.join(', ')}` 
+      return res.status(400).json({
+        message: `Invalid status. Must be one of: ${validOrderStatuses.join(', ')}`
       });
     }
 
     // ── Validate paymentStatus ────────────────────────────
     const validPaymentStatuses = ['Pending', 'Paid', 'Failed'];
     if (paymentStatus && !validPaymentStatuses.includes(paymentStatus)) {
-      return res.status(400).json({ 
-        message: `Invalid payment status. Must be one of: ${validPaymentStatuses.join(', ')}` 
+      return res.status(400).json({
+        message: `Invalid payment status. Must be one of: ${validPaymentStatuses.join(', ')}`
       });
     }
 
@@ -175,9 +178,22 @@ exports.updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    // ── Update fields if provided ─────────────────────────
+    // ── Update orderStatus ────────────────────────────────
     if (orderStatus) order.orderStatus = orderStatus;
-    if (paymentStatus) order.paymentStatus = paymentStatus;   // ← new
+
+    // ── Update paymentStatus ──────────────────────────────
+    if (paymentStatus) {
+      // Admin manually provided paymentStatus → use directly
+      order.paymentStatus = paymentStatus;
+    } else if (orderStatus) {
+      // Auto-update based on orderStatus
+      if (orderStatus === 'Delivered') {
+        order.paymentStatus = 'Paid';    // ← Paid ONLY on Delivered
+      } else if (orderStatus === 'Cancelled') {
+        order.paymentStatus = 'Failed';  // ← Failed on Cancelled
+      }
+      // Created / Confirmed / Processing / Shipped → stays Pending
+    }
 
     await order.save();
 
